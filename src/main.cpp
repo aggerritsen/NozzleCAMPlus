@@ -1,5 +1,6 @@
 /**
  * T-Camera Plus S3 v1.0–v1.1 (ESP32-S3) + OV2640 + ST7789V (240x240, 1.3")
+ * Prooven version
  * - Routes: / (UI from www_index.h), /settings (form), /api/settings (GET/POST),
  *           /jpg, /stream, /health, /reinit
  * - Wi-Fi SoftAP + DNS wildcard (http://nozzlecam/) + mDNS (http://nozzcam.local/)
