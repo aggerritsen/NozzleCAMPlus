@@ -1,6 +1,6 @@
 /**
  * T-Camera Plus S3 v1.0–v1.1 (ESP32-S3) + OV2640 + ST7789V (240x240, 1.3")
- * Prooven version
+ * Prooven Version
  * - Routes: / (UI from www_index.h), /settings (form), /api/settings (GET/POST),
  *           /jpg, /stream, /health, /reinit
  * - Wi-Fi SoftAP + DNS wildcard (http://nozzlecam/) + mDNS (http://nozzcam.local/)
@@ -26,7 +26,7 @@
 #include <DNSServer.h>
 #include <Preferences.h>
 
-// UI page lives here (easier to maintain separately)
+// Web UI (home) uit losse header
 #include "www_index.h"  // extern const char INDEX_HTML[] PROGMEM;
 
 #ifdef USE_ST7789
@@ -46,7 +46,7 @@
 static const char* TAG = "TCAM";
 
 // -------------------- Wi-Fi SoftAP --------------------
-static const char* AP_SSID     = "T-CameraPlus";
+static const char* AP_SSID     = "NozzleCAM";
 static const char* AP_PASSWORD = "";
 static const int   AP_CHANNEL  = 6;
 
@@ -91,6 +91,7 @@ struct CamSettings {
   bool     awb;           // auto white balance
   bool     aec;           // auto exposure
   bool     agc;           // auto gain
+  uint16_t rot;           // rotation: 0 or 180 (OV2640 supports 180° via vflip+hmirror)
 };
 static Preferences prefs;
 static CamSettings S;
@@ -105,6 +106,7 @@ static void setDefaults(CamSettings &cs){
   cs.awb        = true;
   cs.aec        = true;
   cs.agc        = true;
+  cs.rot        = 0;      // 0° standaard
 }
 static void saveSettings(const CamSettings &cs){
   prefs.begin("cam", false);
@@ -117,20 +119,22 @@ static void saveSettings(const CamSettings &cs){
   prefs.putBool ("awb", cs.awb);
   prefs.putBool ("aec", cs.aec);
   prefs.putBool ("agc", cs.agc);
+  prefs.putUShort("rot", cs.rot);
   prefs.end();
 }
 static void loadSettings(CamSettings &cs){
   prefs.begin("cam", true);
   if (!prefs.isKey("q")){ prefs.end(); setDefaults(cs); saveSettings(cs); return; }
-  cs.jpeg_q     = prefs.getUChar("q",   12);
-  cs.fs         = prefs.getUChar("fs",  (uint8_t)FRAMESIZE_SVGA);
-  cs.brightness = prefs.getChar ("bri", 1);
-  cs.contrast   = prefs.getChar ("con", 0);
-  cs.saturation = prefs.getChar ("sat", 0);
-  cs.ae_level   = prefs.getChar ("ae",  1);
-  cs.awb        = prefs.getBool ("awb", true);
-  cs.aec        = prefs.getBool ("aec", true);
-  cs.agc        = prefs.getBool ("agc", true);
+  cs.jpeg_q     = prefs.getUChar ("q",   12);
+  cs.fs         = prefs.getUChar ("fs",  (uint8_t)FRAMESIZE_SVGA);
+  cs.brightness = prefs.getChar  ("bri", 1);
+  cs.contrast   = prefs.getChar  ("con", 0);
+  cs.saturation = prefs.getChar  ("sat", 0);
+  cs.ae_level   = prefs.getChar  ("ae",  1);
+  cs.awb        = prefs.getBool  ("awb", true);
+  cs.aec        = prefs.getBool  ("aec", true);
+  cs.agc        = prefs.getBool  ("agc", true);
+  cs.rot        = prefs.getUShort("rot", 0);
   prefs.end();
 }
 
@@ -168,6 +172,10 @@ static framesize_t fsFromStr(const String& s){
   return (framesize_t)S.fs;
 }
 static int clampi(int v, int lo, int hi){ return v<lo?lo:(v>hi?hi:v); }
+static uint16_t parseRot(const String& s){
+  if (s == "180" || s == "180°") return 180;
+  return 0;
+}
 
 static void sccb_recover() {
   pinMode(SIOD_GPIO_NUM, INPUT_PULLUP);
@@ -225,6 +233,7 @@ static camera_config_t make_cam_cfg(){
 static bool applySensorParams(){
   sensor_t* s = esp_camera_sensor_get();
   if (!s) return false;
+
   if (s->set_framesize)     s->set_framesize(s, (framesize_t)S.fs);
   if (s->set_quality)       s->set_quality(s,   S.jpeg_q);
   if (s->set_brightness)    s->set_brightness(s, S.brightness);
@@ -234,6 +243,15 @@ static bool applySensorParams(){
   if (s->set_whitebal)      s->set_whitebal(s,   S.awb);
   if (s->set_exposure_ctrl) s->set_exposure_ctrl(s, S.aec);
   if (s->set_gain_ctrl)     s->set_gain_ctrl(s,  S.agc);
+
+  // Rotatie: 0° => vflip=0,hmirror=0 ; 180° => vflip=1,hmirror=1
+  if (S.rot == 180) {
+    if (s->set_vflip)   s->set_vflip(s,   1);
+    if (s->set_hmirror) s->set_hmirror(s, 1);
+  } else {
+    if (s->set_vflip)   s->set_vflip(s,   0);
+    if (s->set_hmirror) s->set_hmirror(s, 0);
+  }
   return true;
 }
 
@@ -305,7 +323,7 @@ static void handleIndex(){
 
 // -------------------- HTTP: settings (HTML form UI) --------------------
 static void sendSettingsPage(){
-  char html[4096];
+  char html[4600];
   framesize_t fs = (framesize_t)S.fs;
   snprintf(html, sizeof(html),
     "<!doctype html><html><head><meta charset=utf-8>"
@@ -313,7 +331,7 @@ static void sendSettingsPage(){
     "<title>NozzleCAM Settings</title>"
     "<style>body{font-family:system-ui;margin:1rem;background:#111;color:#eee}"
     "label{display:block;margin:.5rem 0 .2rem}input,select,button{font:inherit;padding:.4rem .5rem;border-radius:.4rem;border:1px solid #444;background:#1a1a1a;color:#eee}"
-    "form{max-width:520px} fieldset{border:1px solid #333;border-radius:.6rem;padding:1rem;margin-bottom:1rem}"
+    "form{max-width:560px} fieldset{border:1px solid #333;border-radius:.6rem;padding:1rem;margin-bottom:1rem}"
     "legend{padding:0 .4rem} .row{display:flex;gap:.6rem} .row>div{flex:1}</style>"
     "</head><body><h2>NozzleCAM Settings</h2>"
     "<form method='POST' action='/settings'>"
@@ -330,6 +348,11 @@ static void sendSettingsPage(){
         "</select>"
         "<label>JPEG quality (lower=better)</label>"
         "<input type='number' min='10' max='30' name='q' value='%u'>"
+        "<label>Rotation</label>"
+        "<select name='rot'>"
+          "<option value='0'%s>0°</option>"
+          "<option value='180'%s>180°</option>"
+        "</select>"
       "</fieldset>"
       "<fieldset><legend>Tuning</legend>"
         "<div class='row'>"
@@ -348,7 +371,7 @@ static void sendSettingsPage(){
       "</fieldset>"
       "<p><button type='submit'>Apply & Save</button> <a href='/' style='margin-left:.6rem'>Back to UI</a></p>"
     "</form>"
-    "<p style='opacity:.7'>Current: fs=%s q=%u bri=%d con=%d sat=%d ae=%d awb=%d aec=%d agc=%d</p>"
+    "<p style='opacity:.7'>Current: fs=%s q=%u rot=%u bri=%d con=%d sat=%d ae=%d awb=%d aec=%d agc=%d</p>"
     "</body></html>",
     (fs==FRAMESIZE_QQVGA)?" selected":"",
     (fs==FRAMESIZE_QVGA) ?" selected":"",
@@ -357,11 +380,13 @@ static void sendSettingsPage(){
     (fs==FRAMESIZE_XGA)  ?" selected":"",
     (fs==FRAMESIZE_SXGA) ?" selected":"",
     (fs==FRAMESIZE_UXGA) ?" selected":"",
-    S.jpeg_q, S.brightness, S.contrast, S.saturation, S.ae_level,
+    S.jpeg_q,
+    (S.rot==0)?" selected":"", (S.rot==180)?" selected":"",
+    S.brightness, S.contrast, S.saturation, S.ae_level,
     S.awb?" selected":"", (!S.awb)?" selected":"",
     S.aec?" selected":"", (!S.aec)?" selected":"",
     S.agc?" selected":"", (!S.agc)?" selected":"",
-    framesizeName((framesize_t)S.fs), S.jpeg_q, S.brightness, S.contrast, S.saturation, S.ae_level,
+    framesizeName((framesize_t)S.fs), S.jpeg_q, S.rot, S.brightness, S.contrast, S.saturation, S.ae_level,
     S.awb, S.aec, S.agc
   );
   server.send(200, "text/html", html);
@@ -378,6 +403,7 @@ static void handleSettingsPost(){
   String awb = server.arg("awb");
   String aec = server.arg("aec");
   String agc = server.arg("agc");
+  String rot = server.arg("rot");
 
   S.fs         = (uint8_t)fsFromStr(fs);
   S.jpeg_q     = (uint8_t)clampi(q.toInt(),    10, 30);
@@ -388,10 +414,12 @@ static void handleSettingsPost(){
   S.awb        = (awb=="1");
   S.aec        = (aec=="1");
   S.agc        = (agc=="1");
+  S.rot        = parseRot(rot);  // 0 of 180
 
   saveSettings(S);
   applySensorParams();
-  // If big FS jumps cause instability, you can call camera_reinit() here.
+  // Als framegrootte wisselt, kun je desgewenst camera_reinit() doen:
+  // camera_reinit();
 
   server.sendHeader("Location", "/settings", true);
   server.send(303, "text/plain", "");
@@ -399,15 +427,17 @@ static void handleSettingsPost(){
 
 // -------------------- HTTP: JSON API for settings --------------------
 static void handleApiGet(){
-  char buf[256];
+  char buf[320];
   framesize_t fs = (framesize_t)S.fs;
   snprintf(buf, sizeof(buf),
     "{"
       "\"fs\":\"%s\",\"q\":%u,"
+      "\"rot\":%u,"
       "\"bri\":%d,\"con\":%d,\"sat\":%d,\"ae\":%d,"
       "\"awb\":%d,\"aec\":%d,\"agc\":%d"
     "}",
-    framesizeName(fs), S.jpeg_q, S.brightness, S.contrast, S.saturation, S.ae_level,
+    framesizeName(fs), S.jpeg_q, S.rot,
+    S.brightness, S.contrast, S.saturation, S.ae_level,
     S.awb, S.aec, S.agc
   );
   server.send(200, "application/json", buf);
@@ -435,6 +465,7 @@ static void handleApiPost(){
     String fs = findStr("fs", framesizeName((framesize_t)S.fs));
     S.fs         = (uint8_t)fsFromStr(fs);
     S.jpeg_q     = (uint8_t)clampi(findInt("q",  S.jpeg_q), 10, 30);
+    S.rot        = (uint16_t)((findInt("rot", S.rot)==180) ? 180 : 0);
     S.brightness = (int8_t)clampi(findInt("bri",S.brightness), -2, 2);
     S.contrast   = (int8_t)clampi(findInt("con",S.contrast),   -2, 2);
     S.saturation = (int8_t)clampi(findInt("sat",S.saturation), -2, 2);
@@ -560,26 +591,26 @@ void setup(){
   }
 
 #ifdef USE_ST7789
-  // Show splash on the TFT
+  // Show splash op de TFT
   tft_init_and_splash(AP_SSID, ip.toString());
 #endif
 
   // Routes
   server.on("/",             HTTP_GET, handleIndex);
-  server.on("/settings",     HTTP_GET, handleSettingsGet);
-  server.on("/settings",     HTTP_POST, handleSettingsPost);
-  server.on("/api/settings", HTTP_GET, handleApiGet);
-  server.on("/api/settings", HTTP_POST, handleApiPost);
+  server.on("/settings",     HTTP_GET,  [](){ handleSettingsGet(); });
+  server.on("/settings",     HTTP_POST, [](){ handleSettingsPost(); });
+  server.on("/api/settings", HTTP_GET,  [](){ handleApiGet(); });
+  server.on("/api/settings", HTTP_POST, [](){ handleApiPost(); });
   server.on("/health",       HTTP_GET, handleHealth);
   server.on("/reinit",       HTTP_GET, handleReinit);
   server.on("/jpg",          HTTP_GET, handleJpg);
   server.on("/stream",       HTTP_GET, handleStream);
   server.begin();
 
-  Serial.println("UI:     http://192.168.4.1");
-  Serial.println("Stream: http://192.168.4.1/stream");
-  Serial.println("Also try: http://nozzlecam/  or  http://nozzcam.local/");
+  Serial.println("UI:       http://192.168.4.1");
+  Serial.println("Stream:   http://192.168.4.1/stream");
   Serial.println("Settings: http://192.168.4.1/settings");
+  Serial.println("Also try: http://nozzlecam/  or  http://nozzcam.local/");
 }
 
 // -------------------- Loop --------------------
